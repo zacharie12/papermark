@@ -12,12 +12,8 @@ export default async function handler(
       body,
       request: req,
       onBeforeGenerateToken: async (pathname) => {
-        // You can add authentication checks here if needed
-        // const session = await getServerSession(req, res, authOptions);
-        // if (!session) throw new Error('Unauthorized');
-
+        // We list the content types you want to allow uploading
         return {
-          // We list the content types you want to allow uploading
           allowedContentTypes: [
             'application/pdf',
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
@@ -33,7 +29,6 @@ export default async function handler(
         };
       },
       onUploadCompleted: async ({ blob, tokenPayload }) => {
-        // This runs after the upload is successfully finished
         console.log('Upload completed:', blob);
       },
     });
