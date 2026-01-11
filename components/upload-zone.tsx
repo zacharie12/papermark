@@ -306,17 +306,28 @@ export default function UploadZone({
         }
 
         // --- UPLOAD LOGIC START ---
-        // Determined by Environment Variable (defaulting to "tus")
         const uploadTransport =
           process.env.NEXT_PUBLIC_UPLOAD_TRANSPORT || "tus";
         let complete;
 
         if (uploadTransport === "vercel") {
+          // FIX: Manually generate a unique path to avoid "File already exists" error
+          // This replaces 'addRandomSuffix: true' which was causing build errors
+          let uniquePath = path;
+          const lastDotIndex = path.lastIndexOf('.');
+          if (lastDotIndex !== -1) {
+              const basePath = path.substring(0, lastDotIndex);
+              const extension = path.substring(lastDotIndex);
+              uniquePath = `${basePath}-${Math.random().toString(36).substring(2, 8)}${extension}`;
+          } else {
+              uniquePath = `${path}-${Math.random().toString(36).substring(2, 8)}`;
+          }
+
           // Vercel Blob Upload
-          const uploadPromise = vercelUpload(path, file, {
+          const uploadPromise = vercelUpload(uniquePath, file, {
             access: "public",
-            handleUploadUrl: "/api/file/upload", // Ensure this route exists
-            addRandomSuffix: true, // <--- Added random suffix to prevent duplicates
+            handleUploadUrl: "/api/file/upload", 
+            // addRandomSuffix: true, <--- Removed to fix build error
             onUploadProgress: ({ percentage }) => {
               const progress = Math.min(Math.round(percentage), 99);
               setUploads((prevUploads) => {
@@ -338,7 +349,7 @@ export default function UploadZone({
             .then((blob) => ({
               id: blob.url,
               fileType: blob.contentType || file.type,
-              fileName: file.name,
+              fileName: file.name, // Keep original name for the DB
               numPages,
             }))
             .catch((error) => {
