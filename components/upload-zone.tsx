@@ -6,7 +6,7 @@ import { useSession } from "next-auth/react";
 import { DropEvent, FileRejection, useDropzone } from "react-dropzone";
 import { toast } from "sonner";
 import { mutate } from "swr";
-import { upload as vercelUpload } from "@vercel/blob/client"; // [!code ++]
+import { upload as vercelUpload } from "@vercel/blob/client";
 
 import { useAnalytics } from "@/lib/analytics";
 import {
@@ -307,7 +307,8 @@ export default function UploadZone({
 
         // --- UPLOAD LOGIC START ---
         // Determined by Environment Variable (defaulting to "tus")
-        const uploadTransport = process.env.NEXT_PUBLIC_UPLOAD_TRANSPORT || "tus";
+        const uploadTransport =
+          process.env.NEXT_PUBLIC_UPLOAD_TRANSPORT || "tus";
         let complete;
 
         if (uploadTransport === "vercel") {
@@ -315,6 +316,7 @@ export default function UploadZone({
           const uploadPromise = vercelUpload(path, file, {
             access: "public",
             handleUploadUrl: "/api/file/upload", // Ensure this route exists
+            addRandomSuffix: true, // <--- Added random suffix to prevent duplicates
             onUploadProgress: ({ percentage }) => {
               const progress = Math.min(Math.round(percentage), 99);
               setUploads((prevUploads) => {
@@ -427,7 +429,9 @@ export default function UploadZone({
           supportedFileType: supportedFileType,
           name: file.name,
           // FIX: dynamically set the storage type based on the transport used
-          storageType: (uploadTransport === "vercel" ? "VERCEL_BLOB" : DocumentStorageType.S3_PATH) as any,
+          storageType: (uploadTransport === "vercel"
+            ? "VERCEL_BLOB"
+            : DocumentStorageType.S3_PATH) as any,
           contentType: contentType,
           fileSize: file.size,
         };
