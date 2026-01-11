@@ -1,13 +1,12 @@
 import { useRouter } from "next/router";
-
 import { useCallback, useEffect, useMemo, useRef } from "react";
-
 import { useTeam } from "@/context/team-context";
 import { DocumentStorageType } from "@prisma/client";
 import { useSession } from "next-auth/react";
 import { DropEvent, FileRejection, useDropzone } from "react-dropzone";
 import { toast } from "sonner";
 import { mutate } from "swr";
+import { upload as vercelUpload } from "@vercel/blob/client"; // [!code ++]
 
 import { useAnalytics } from "@/lib/analytics";
 import {
@@ -35,9 +34,6 @@ import {
 } from "@/lib/utils/get-file-size-limits";
 import { getPagesCount } from "@/lib/utils/get-page-number-count";
 
-// Originally these mime values were directly used in the dropzone hook.
-// There was a solid reason to take them out of the scope, primarily to solve a browser compatibility issue to determine the file type when user dropped a folder.
-// you will figure out how this change helped to fix the compatibility issue once you have went through reading of `getFilesFromDropEvent` and `traverseFolder`
 const acceptableDropZoneMimeTypesWhenIsFreePlanAndNotTrial =
   FREE_PLAN_ACCEPTED_FILE_TYPES;
 const allAcceptableDropZoneMimeTypes = FULL_PLAN_ACCEPTED_FILE_TYPES;
@@ -104,18 +100,13 @@ export default function UploadZone({
     ? limits?.documents - limits?.usage?.documents
     : 0;
 
-  // Fetch team settings with proper revalidation - ensures settings stay fresh across tabs
   const { settings: teamSettings } = useTeamSettings(teamInfo?.currentTeam?.id);
   const replicateDataroomFolders =
     teamSettings?.replicateDataroomFolders ?? true;
 
-  // Track if we've created the dataroom folder in "All Documents" for non-replication mode
-  // Using promise-lock pattern to prevent race conditions during concurrent folder creation
   const dataroomFolderPathRef = useRef<string | null>(null);
   const dataroomFolderCreationPromiseRef = useRef<Promise<string> | null>(null);
 
-  // Reset the cached dataroom folder path when the replication setting changes
-  // This ensures we don't use stale cached paths if the setting is toggled
   useEffect(() => {
     dataroomFolderPathRef.current = null;
     dataroomFolderCreationPromiseRef.current = null;
@@ -136,27 +127,21 @@ export default function UploadZone({
       ? acceptableDropZoneMimeTypesWhenIsFreePlanAndNotTrial
       : allAcceptableDropZoneMimeTypes;
 
-  // Helper function to get or create the dataroom folder in "All Documents"
-  // Uses promise-lock pattern to prevent concurrent creation attempts
   const getOrCreateDataroomFolder = useCallback(async (): Promise<string> => {
-    // If we already have the path cached, return it immediately
     if (dataroomFolderPathRef.current) {
       return dataroomFolderPathRef.current;
     }
 
-    // If there's an ongoing creation, await it
     if (dataroomFolderCreationPromiseRef.current) {
       return dataroomFolderCreationPromiseRef.current;
     }
 
-    // Start a new creation process
     const creationPromise = (async () => {
       try {
         if (!teamInfo?.currentTeam?.id || !dataroomName) {
           throw new Error("Missing team ID or dataroom name");
         }
 
-        // First check if the folder already exists
         const existingFoldersResponse = await fetch(
           `/api/teams/${teamInfo.currentTeam.id}/folders?root=true`,
         );
@@ -168,7 +153,6 @@ export default function UploadZone({
           );
 
           if (existingDataroomFolder) {
-            // Folder already exists, use it
             const folderPath = existingDataroomFolder.path.startsWith("/")
               ? existingDataroomFolder.path.slice(1)
               : existingDataroomFolder.path;
@@ -177,11 +161,10 @@ export default function UploadZone({
           }
         }
 
-        // Folder doesn't exist, create it
         const dataroomFolderResponse = await createFolderInMainDocs({
           teamId: teamInfo.currentTeam.id,
           name: dataroomName,
-          path: undefined, // Create at root level
+          path: undefined,
         });
 
         const folderPath = dataroomFolderResponse.path.startsWith("/")
@@ -198,24 +181,19 @@ export default function UploadZone({
         return folderPath;
       } catch (error) {
         console.error("Error handling dataroom folder:", error);
-        // Clear the promise ref on error so subsequent attempts can retry
         dataroomFolderCreationPromiseRef.current = null;
-        // Use dataroom name as fallback path
         const fallbackPath = dataroomName || "";
         dataroomFolderPathRef.current = fallbackPath;
         return fallbackPath;
       } finally {
-        // Clear the promise ref once creation is complete
         dataroomFolderCreationPromiseRef.current = null;
       }
     })();
 
-    // Store the promise so concurrent callers can await it
     dataroomFolderCreationPromiseRef.current = creationPromise;
     return creationPromise;
   }, [teamInfo, dataroomName, dataroomId, analytics]);
 
-  // this var will help to determine the correct api endpoint to request folder creation (If needed).
   const endpointTargetType = dataroomId
     ? `datarooms/${dataroomId}/folders`
     : "folders";
@@ -242,7 +220,6 @@ export default function UploadZone({
 
   const onDrop = useCallback(
     async (acceptedFiles: FileWithPaths[]) => {
-      // Check if team is paused
       if (isPaused) {
         toast.error(
           "Your subscription is paused. Resume your subscription to upload documents.",
@@ -261,14 +238,13 @@ export default function UploadZone({
         return;
       }
 
-      // Validate files and separate into valid and invalid
       const validatedFiles = acceptedFiles.reduce<{
         valid: FileWithPaths[];
         invalid: { fileName: string; message: string }[];
       }>(
         (acc, file) => {
           const fileSizeLimitMB = getFileSizeLimit(file.type, fileSizeLimits);
-          const fileSizeLimit = fileSizeLimitMB * 1024 * 1024; // Convert to bytes
+          const fileSizeLimit = fileSizeLimitMB * 1024 * 1024;
 
           if (file.size > fileSizeLimit) {
             acc.invalid.push({
@@ -287,11 +263,9 @@ export default function UploadZone({
         { valid: [], invalid: [] },
       );
 
-      // Handle rejected files first
       if (validatedFiles.invalid.length > 0) {
         setRejectedFiles((prev) => [...validatedFiles.invalid, ...prev]);
 
-        // If all files were rejected, show a summary toast
         if (validatedFiles.valid.length === 0) {
           toast.error(
             `${validatedFiles.invalid.length} file(s) exceeded size limits`,
@@ -300,7 +274,6 @@ export default function UploadZone({
         }
       }
 
-      // Continue with valid files
       const newUploads = validatedFiles.valid.map((file) => ({
         fileName: file.name,
         progress: 0,
@@ -310,11 +283,8 @@ export default function UploadZone({
       onUploadStart(newUploads);
 
       const uploadPromises = validatedFiles.valid.map(async (file, index) => {
-        // Due to `getFilesFromEvent` file.path will always hold a valid value and represents the value of webkitRelativePath.
-        // We no longer need to use webkitRelativePath because everything is been handled in `getFilesFromEvent`
         const path = file.path || file.name;
 
-        // count the number of pages in the file
         let numPages = 1;
         if (file.type === "application/pdf") {
           const buffer = await file.arrayBuffer();
@@ -335,46 +305,98 @@ export default function UploadZone({
           }
         }
 
-        const { complete } = await resumableUpload({
-          file, // File
-          onProgress: (bytesUploaded, bytesTotal) => {
-            const progress = Math.min(
-              Math.round((bytesUploaded / bytesTotal) * 100),
-              99,
-            );
-            setUploads((prevUploads) => {
-              const updatedUploads = prevUploads.map((upload) =>
-                upload.uploadId === newUploads[index].uploadId
-                  ? { ...upload, progress }
-                  : upload,
-              );
-              const currentUpload = updatedUploads.find(
-                (upload) => upload.uploadId === newUploads[index].uploadId,
-              );
+        // --- UPLOAD LOGIC START ---
+        // Determined by Environment Variable (defaulting to "tus")
+        const uploadTransport = process.env.NEXT_PUBLIC_UPLOAD_TRANSPORT || "tus";
+        let complete;
 
-              onUploadProgress(index, progress, currentUpload?.documentId);
-              return updatedUploads;
+        if (uploadTransport === "vercel") {
+          // Vercel Blob Upload
+          const uploadPromise = vercelUpload(path, file, {
+            access: "public",
+            handleUploadUrl: "/api/file/upload", // Ensure this route exists
+            onUploadProgress: ({ percentage }) => {
+              const progress = Math.min(Math.round(percentage), 99);
+              setUploads((prevUploads) => {
+                const updatedUploads = prevUploads.map((upload) =>
+                  upload.uploadId === newUploads[index].uploadId
+                    ? { ...upload, progress }
+                    : upload,
+                );
+                const currentUpload = updatedUploads.find(
+                  (upload) => upload.uploadId === newUploads[index].uploadId,
+                );
+                onUploadProgress(index, progress, currentUpload?.documentId);
+                return updatedUploads;
+              });
+            },
+          });
+
+          complete = uploadPromise
+            .then((blob) => ({
+              id: blob.url,
+              fileType: blob.contentType || file.type,
+              fileName: file.name,
+              numPages,
+            }))
+            .catch((error) => {
+              console.error("Vercel Upload Error:", error);
+              setUploads((prev) =>
+                prev.filter(
+                  (upload) => upload.uploadId !== newUploads[index].uploadId,
+                ),
+              );
+              setRejectedFiles((prev) => [
+                { fileName: file.name, message: "Error uploading file" },
+                ...prev,
+              ]);
+              throw error;
             });
-          },
-          onError: (error) => {
-            setUploads((prev) =>
-              prev.filter(
-                (upload) => upload.uploadId !== newUploads[index].uploadId,
-              ),
-            );
+        } else {
+          // Default TUS Upload
+          const res = await resumableUpload({
+            file,
+            onProgress: (bytesUploaded, bytesTotal) => {
+              const progress = Math.min(
+                Math.round((bytesUploaded / bytesTotal) * 100),
+                99,
+              );
+              setUploads((prevUploads) => {
+                const updatedUploads = prevUploads.map((upload) =>
+                  upload.uploadId === newUploads[index].uploadId
+                    ? { ...upload, progress }
+                    : upload,
+                );
+                const currentUpload = updatedUploads.find(
+                  (upload) => upload.uploadId === newUploads[index].uploadId,
+                );
 
-            setRejectedFiles((prev) => [
-              { fileName: file.name, message: "Error uploading file" },
-              ...prev,
-            ]);
-          },
-          ownerId: (session?.user as CustomUser).id,
-          teamId: teamInfo?.currentTeam?.id as string,
-          numPages,
-          relativePath: path.substring(0, path.lastIndexOf("/")),
-        });
+                onUploadProgress(index, progress, currentUpload?.documentId);
+                return updatedUploads;
+              });
+            },
+            onError: (error) => {
+              setUploads((prev) =>
+                prev.filter(
+                  (upload) => upload.uploadId !== newUploads[index].uploadId,
+                ),
+              );
+
+              setRejectedFiles((prev) => [
+                { fileName: file.name, message: "Error uploading file" },
+                ...prev,
+              ]);
+            },
+            ownerId: (session?.user as CustomUser).id,
+            teamId: teamInfo?.currentTeam?.id as string,
+            numPages,
+            relativePath: path.substring(0, path.lastIndexOf("/")),
+          });
+          complete = res.complete;
+        }
 
         const uploadResult = await complete;
+        // --- UPLOAD LOGIC END ---
 
         let contentType = uploadResult.fileType;
         let supportedFileType = getSupportedContentType(contentType) ?? "";
@@ -419,7 +441,6 @@ export default function UploadZone({
           folderPathName: fileUploadPathName,
         });
 
-        // add the new document to the list
         mutate(`/api/teams/${teamInfo?.currentTeam?.id}/documents`);
 
         fileUploadPathName &&
@@ -440,7 +461,8 @@ export default function UploadZone({
                 },
                 body: JSON.stringify({
                   documentId: document.id,
-                  folderPathName: dataroomUploadPathName || fileUploadPathName,
+                  folderPathName:
+                    dataroomUploadPathName || fileUploadPathName,
                 }),
               },
             );
@@ -469,7 +491,6 @@ export default function UploadZone({
           }
         }
 
-        // update progress to 100%
         setUploads((prevUploads) =>
           prevUploads.map((upload) =>
             upload.uploadId === newUploads[index].uploadId
@@ -501,14 +522,12 @@ export default function UploadZone({
       });
 
       const documents = Promise.all(uploadPromises).finally(() => {
-        /* If it a parentFolder was created prior to the upload, we would need to update that
-           how many documents and folders does this folder contain rather than displaying 0
-            */
-
         mutate(
           `/api/teams/${teamInfo?.currentTeam?.id}/${endpointTargetType}?root=true`,
         );
-        mutate(`/api/teams/${teamInfo?.currentTeam?.id}/${endpointTargetType}`);
+        mutate(
+          `/api/teams/${teamInfo?.currentTeam?.id}/${endpointTargetType}`,
+        );
         folderPathName &&
           mutate(
             `/api/teams/${teamInfo?.currentTeam?.id}/${endpointTargetType}/${folderPathName}`,
@@ -535,26 +554,21 @@ export default function UploadZone({
 
   const getFilesFromEvent = useCallback(
     async (event: DropEvent) => {
-      // This callback also run when event.type =`dragenter`. We only need to compute files when the event.type is `drop`.
-      if ("type" in event && event.type !== "drop" && event.type !== "change") {
+      if (
+        "type" in event &&
+        event.type !== "drop" &&
+        event.type !== "change"
+      ) {
         return [];
       }
 
       let filesToBePassedToOnDrop: FileWithPaths[] = [];
 
-      /** *********** START OF `traverseFolder` *********** */
       const traverseFolder = async (
         entry: FileSystemEntry,
         parentPathOfThisEntry?: string,
         dataroomParentPath?: string,
       ): Promise<FileWithPaths[]> => {
-        /**
-         * Summary of this function:
-         *  1. if it find a folder then corresponding folder will be created at backend.
-         *  2. Smoothly handles the deeply nested folders.
-         *  3. Upon folder creation it assign the path and whereToUploadPath to each entry. (Those values will be helpful for `onDrop` to  upload document correctly)
-         */
-
         let files: FileWithPaths[] = [];
 
         if (isSystemFile(entry.name)) {
@@ -562,12 +576,7 @@ export default function UploadZone({
         }
 
         if (entry.isDirectory) {
-          /**
-           * Let's create the folder.
-           * Fact that reader can skip: For Consistency, child files will only be pushed if folder successfully gets created.
-           */
           try {
-            // An empty folder name can cause the unexpected url problems.
             if (entry.name.trim() === "") {
               setRejectedFiles((prev) => [
                 {
@@ -580,7 +589,6 @@ export default function UploadZone({
             }
 
             if (!teamInfo?.currentTeam?.id) {
-              /** This case probably may not happen */
               setRejectedFiles((prev) => [
                 {
                   fileName: "Unknown Team",
@@ -591,9 +599,7 @@ export default function UploadZone({
               throw new Error("No team found");
             }
 
-            // Create folder in main documents if not in dataroom
             if (!dataroomId) {
-              // Create folder in main documents only
               const { path: folderPath } = await createFolderInMainDocs({
                 teamId: teamInfo.currentTeam.id,
                 name: entry.name,
@@ -639,8 +645,6 @@ export default function UploadZone({
                 isFirstLevelFolder,
               });
 
-              // If replication is disabled, ensure the dataroom folder exists in "All Documents"
-              // Uses promise-lock pattern to prevent race conditions
               if (!replicateDataroomFolders && dataroomName) {
                 await getOrCreateDataroomFolder();
               }
@@ -667,8 +671,6 @@ export default function UploadZone({
                 (subEntry) => !isSystemFile(subEntry.name),
               );
 
-              // Use the resolved paths for all children
-              // Guard against undefined mainDocsPath when replication is disabled
               const resolvedMainDocsPath = mainDocsPath
                 ? mainDocsPath.startsWith("/")
                   ? mainDocsPath.slice(1)
@@ -710,20 +712,20 @@ export default function UploadZone({
             (entry as FileSystemFileEntry).file(resolve),
           );
 
-          /** In some browsers e.g firefox is not able to detect the file type. (This only happens when user upload folder) */
           const browserFileTypeCompatibilityIssue = file.type === "";
 
           if (browserFileTypeCompatibilityIssue) {
             const fileExtension = file.name.split(".").pop()?.toLowerCase();
             let correctMimeType: string | undefined;
             if (fileExtension) {
-              // Iterate through acceptableDropZoneFileTypes to find the MIME type for the extension
               for (const [mime, extsUntyped] of Object.entries(
                 acceptableDropZoneFileTypes,
               )) {
-                const exts = extsUntyped as string[]; // Explicitly type exts
+                const exts = extsUntyped as string[];
                 if (
-                  exts.some((ext) => ext.toLowerCase() === "." + fileExtension)
+                  exts.some(
+                    (ext) => ext.toLowerCase() === "." + fileExtension,
+                  )
                 ) {
                   correctMimeType = mime;
                   break;
@@ -732,8 +734,6 @@ export default function UploadZone({
             }
 
             if (correctMimeType) {
-              // if we can't do like ```file.type = fileType``` because of [Error: Setting getter-only property "type"]
-              // The following is the only best way to resolve the problem
               file = new File([file], file.name, {
                 type: correctMimeType,
                 lastModified: file.lastModified,
@@ -741,19 +741,14 @@ export default function UploadZone({
             }
           }
 
-          // Reason of removing "/" because webkitRelativePath doesn't start with "/"
           file.path = entry.fullPath.startsWith("/")
             ? entry.fullPath.substring(1)
             : entry.fullPath;
 
-          // Determine where to upload in "All Documents"
           if (!replicateDataroomFolders && dataroomId && dataroomName) {
-            // If replication is disabled, ensure the dataroom folder exists and use it
-            // This await is safe because getOrCreateDataroomFolder uses a promise-lock
             const dataroomFolderPath = await getOrCreateDataroomFolder();
             file.whereToUploadPath = dataroomFolderPath;
           } else {
-            // If replication is enabled or not in a dataroom, use the normal folder path
             file.whereToUploadPath = parentPathOfThisEntry ?? folderPathName;
           }
 
@@ -764,14 +759,12 @@ export default function UploadZone({
 
         return files;
       };
-      /** *********** END OF `traverseFolder` *********** */
 
       if ("dataTransfer" in event && event.dataTransfer) {
         const items = event.dataTransfer.items;
 
         const fileResults = await Promise.all(
           Array.from(items, (item) => {
-            // MDN Note: This function is implemented as webkitGetAsEntry() in non-WebKit browsers including Firefox at this time; it may be renamed to getAsEntry() in the future, so you should code defensively, looking for both.
             const entry =
               (typeof item?.webkitGetAsEntry === "function" &&
                 item.webkitGetAsEntry()) ??
@@ -823,7 +816,6 @@ export default function UploadZone({
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: acceptableDropZoneFileTypes,
     multiple: true,
-    // maxSize: maxSize * 1024 * 1024, // 30 MB
     maxFiles: fileSizeLimits.maxFiles ?? 150,
     onDrop,
     onDropRejected,
