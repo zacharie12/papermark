@@ -426,7 +426,8 @@ export default function UploadZone({
           key: uploadResult.id,
           supportedFileType: supportedFileType,
           name: file.name,
-          storageType: DocumentStorageType.S3_PATH,
+          // FIX: dynamically set the storage type based on the transport used
+          storageType: (uploadTransport === "vercel" ? "VERCEL_BLOB" : DocumentStorageType.S3_PATH) as any,
           contentType: contentType,
           fileSize: file.size,
         };
