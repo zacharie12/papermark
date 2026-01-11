@@ -200,9 +200,8 @@ function prepareRemotePatterns() {
 
   if (process.env.VERCEL_ENV === "production") {
     patterns.push({
-      // production vercel blob
       protocol: "https",
-      hostname: "yoywvlh29jppecbh.public.blob.vercel-storage.com",
+      hostname: "*.public.blob.vercel-storage.com", // Change to wildcard
     });
   }
 
